@@ -24,6 +24,7 @@ urlpatterns = [
     path('api/accounts/', include('accounts.urls')),
     path('api/problems/', include('problems.urls')),
     path('api/submissions/', include('submissions.urls')),
+    path('api/contest/', include('contest.urls')),
     path('api/auth/login/', TokenObtainPairView.as_view()),
     path('api/auth/refresh/', TokenRefreshView.as_view()),
 ]

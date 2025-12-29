@@ -106,7 +106,7 @@ class SubmitSolutionView(APIView):
                     status_code = result["status"]["id"]
                     mapped_status = JUDGE0_STATUS_MAP.get(status_code, "ERROR")
 
-                    if status_code != 'AC':
+                    if mapped_status != 'AC':
                         all_passed = False
 
                     # Save individual test case result
