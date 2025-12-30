@@ -8,10 +8,10 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     username = models.CharField(max_length=50, unique=True)
     email = models.EmailField(unique=True)
-    password_hash = models.TextField()
+    password = models.TextField()
     full_name = models.CharField(max_length=100, blank=True, null=True)
     country = models.CharField(max_length=100, blank=True, null=True)
-    rating = models.IntegerField(default=1200)
+    rating = models.IntegerField(default=1200,null=True,blank=True)
     is_admin = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 

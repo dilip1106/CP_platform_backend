@@ -21,12 +21,16 @@ class Submission(models.Model):
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='submissions')
     problem = models.ForeignKey(Problem, on_delete=models.CASCADE, related_name='submissions')
+    contest = models.ForeignKey('contest.Contest', on_delete=models.CASCADE, related_name='submissions', null=True, blank=True)
     language = models.CharField(max_length=10, choices=LanguageChoices.choices)
     source_code = models.TextField()
     status = models.CharField(max_length=10, choices=StatusChoices.choices, default=StatusChoices.PENDING)
     execution_time_ms = models.IntegerField(null=True, blank=True)
     memory_usage_kb = models.IntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
 
     def __str__(self):
         return f"{self.user} | {self.problem} | {self.status}"
@@ -40,3 +44,9 @@ class SubmissionResult(models.Model):
     stderr = models.TextField(null=True, blank=True)
     execution_time_ms = models.IntegerField(null=True, blank=True)
     memory_usage_kb = models.IntegerField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['id']
+
+    def __str__(self):
+        return f"{self.submission.id} - {self.test_case.id} - {self.status}"

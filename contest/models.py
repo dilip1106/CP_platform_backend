@@ -76,3 +76,43 @@ class ContestParticipant(models.Model):
 
     def __str__(self):
         return f"{self.user} -> {self.contest.title}"
+
+
+class ContestRegistration(models.Model):
+    """
+    Track user registrations for contests
+    Different from ContestParticipant - registration happens before contest
+    Participant is created when user actually participates
+    """
+    STATUS_CHOICES = [
+        ('REGISTERED', 'Registered'),
+        ('PARTICIPATED', 'Participated'),
+        ('CANCELLED', 'Cancelled'),
+    ]
+
+    contest = models.ForeignKey(
+        Contest,
+        on_delete=models.CASCADE,
+        related_name='registrations'
+    )
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='contest_registrations'
+    )
+    
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='REGISTERED'
+    )
+    
+    registered_at = models.DateTimeField(auto_now_add=True)
+    participated_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        unique_together = ('contest', 'user')
+        ordering = ['-registered_at']
+
+    def __str__(self):
+        return f"{self.user} - {self.contest.title} ({self.status})"
