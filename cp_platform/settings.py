@@ -42,11 +42,11 @@ SIMPLE_JWT = {
 # Application definition
 
 INSTALLED_APPS = [
-    'cp_platform',
     'accounts',
     'problems',
     'submissions',
     'contest',
+    'corsheaders',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -59,6 +59,7 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -66,6 +67,14 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'contest.middleware.ContestStateMiddleware',  # ADD THIS
+]
+
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://id-preview--cc971532-da29-40dc-b30a-282d45d6f8fb.lovable.app",
+    "https://v0.app",
 ]
 
 ROOT_URLCONF = 'cp_platform.urls'

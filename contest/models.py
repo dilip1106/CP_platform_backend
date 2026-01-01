@@ -1,5 +1,6 @@
 from django.db import models
 from django.conf import settings
+from django.utils.timezone import now
 
 User = settings.AUTH_USER_MODEL
 
@@ -29,8 +30,43 @@ class Contest(models.Model):
 
     created_at = models.DateTimeField(auto_now_add=True)
 
+    # ADD THESE FIELDS
+    STATE_CHOICES = [
+        ('DRAFT', 'Draft'),
+        ('SCHEDULED', 'Scheduled'),
+        ('LIVE', 'Live'),
+        ('ENDED', 'Ended'),
+        ('ARCHIVED', 'Archived'),
+    ]
+    
+    state = models.CharField(
+        max_length=20,
+        choices=STATE_CHOICES,
+        default='DRAFT',
+        help_text="Contest lifecycle state"
+    )
+    
+    is_published = models.BooleanField(
+        default=False,
+        help_text="Only SCHEDULED+ contests are visible to participants"
+    )
+    
+    logo = models.URLField(blank=True, null=True)
+    rules = models.TextField(blank=True)
+    
+    # TIMESTAMPS (for automatic state transitions)
+    published_at = models.DateTimeField(null=True, blank=True)
+    last_state_update = models.DateTimeField(auto_now=True)
+
     def __str__(self):
-        return self.title
+        return f"{self.title} ({self.state})"
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['state', 'start_time']),
+            models.Index(fields=['is_published']),
+        ]
 
 
 class ContestProblem(models.Model):

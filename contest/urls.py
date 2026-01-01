@@ -30,7 +30,8 @@ from .views import (
     ManagerViewSubmissionCodeView,
     ManagerContestLeaderboardView,
     ManagerSubmissionAnalyticsView,
-    ManagerExportContestDataView
+    ManagerExportContestDataView,
+    ContestPublishView,
 )
 
 urlpatterns = [
@@ -242,5 +243,12 @@ urlpatterns = [
         "contests/<int:contest_id>/manager/export/",
         ManagerExportContestDataView.as_view(),
         name="manager-export-data"
+    ),
+
+    # Publish contest (DRAFT → SCHEDULED)
+    path(
+        "contests/<int:contest_id>/publish/",
+        ContestPublishView.as_view(),
+        name="contest-publish"
     ),
 ]
