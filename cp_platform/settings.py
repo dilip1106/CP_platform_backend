@@ -46,6 +46,7 @@ INSTALLED_APPS = [
     'problems',
     'submissions',
     'contest',
+    'challenges',
     'corsheaders',
     'django.contrib.admin',
     'django.contrib.auth',

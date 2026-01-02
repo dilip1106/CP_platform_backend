@@ -152,3 +152,38 @@ class ContestRegistration(models.Model):
 
     def __str__(self):
         return f"{self.user} - {self.contest.title} ({self.status})"
+
+
+class ContestChallenge(models.Model):
+    """
+    Link challenges to contests.
+    Similar to ContestProblem but for challenges.
+    """
+    contest = models.ForeignKey(
+        Contest,
+        on_delete=models.CASCADE,
+        related_name='contest_challenges'
+    )
+    challenge = models.ForeignKey(
+        'challenges.Challenge',
+        on_delete=models.CASCADE,
+        related_name='contest_appearances'
+    )
+
+    order = models.PositiveIntegerField(
+        help_text="Order of challenge in contest (A=1, B=2...)"
+    )
+
+    # Challenge-specific settings per contest
+    score = models.IntegerField(default=100)
+    time_limit = models.IntegerField(
+        default=1000,
+        help_text="Time limit in ms (overrides challenge default)"
+    )
+
+    class Meta:
+        unique_together = ('contest', 'challenge')
+        ordering = ['order']
+
+    def __str__(self):
+        return f"{self.contest.title} - {self.challenge.title}"

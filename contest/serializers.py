@@ -294,3 +294,21 @@ class ContestDetailWithRegistrationSerializer(serializers.ModelSerializer):
             return "ONGOING"
         else:
             return "ENDED"
+
+
+class ContestChallengeSerializer(serializers.ModelSerializer):
+    challenge_title = serializers.CharField(source="challenge.title", read_only=True)
+    challenge_slug = serializers.CharField(source="challenge.slug", read_only=True)
+    difficulty = serializers.CharField(source="challenge.difficulty", read_only=True)
+
+    class Meta:
+        model = __import__('contest.models', fromlist=['ContestChallenge']).ContestChallenge
+        fields = [
+            "id",
+            "order",
+            "challenge_title",
+            "challenge_slug",
+            "difficulty",
+            "score",
+            "time_limit",
+        ]
