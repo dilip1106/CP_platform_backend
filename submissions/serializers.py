@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from .models import Submission, SubmissionResult
-
+from problems.models import Problem
 # -------------------------
 # Test Case Result Serializer
 # -------------------------
@@ -50,13 +50,32 @@ class SubmissionSerializer(serializers.ModelSerializer):
 # -------------------------
 # Create Submission Serializer
 # -------------------------
+
+
 class SubmissionCreateSerializer(serializers.ModelSerializer):
+    problem_id = serializers.IntegerField(write_only=True)
+
     class Meta:
         model = Submission
-        fields = ['problem', 'language', 'source_code']
+        fields = ['problem_id', 'language', 'source_code']
+
+    def validate_problem_id(self, value):
+        if not Problem.objects.filter(id=value, is_published=True).exists():
+            raise serializers.ValidationError("Invalid or unpublished problem")
+        return value
 
     def validate_language(self, value):
         from .languages import LANGUAGE_CONFIG
         if value not in LANGUAGE_CONFIG:
             raise serializers.ValidationError("Unsupported language")
         return value
+
+    def create(self, validated_data):
+        problem_id = validated_data.pop('problem_id')
+        problem = Problem.objects.get(id=problem_id)
+
+        submission = Submission.objects.create(
+            problem=problem,
+            **validated_data
+        )
+        return submission
