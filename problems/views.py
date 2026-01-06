@@ -25,7 +25,7 @@ class ProblemListView(APIView):
 
     def get(self, request):
         problems = Problem.objects.filter(
-            is_published=True
+            state='PUBLISHED'
         ).order_by('-created_at')
         
         serializer = ProblemListSerializer(problems, many=True)
@@ -45,7 +45,7 @@ class ProblemDetailView(APIView):
         problem = get_object_or_404(
             Problem,
             slug=slug,
-            is_published=True
+            state='PUBLISHED'
         )
         
         serializer = ProblemDetailSerializer(
