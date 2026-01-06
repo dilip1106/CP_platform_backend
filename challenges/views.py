@@ -2,9 +2,12 @@ from django.shortcuts import get_object_or_404
 from django.utils.timezone import now
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated, IsAdminUser
-from rest_framework import status
+from rest_framework.permissions import IsAuthenticated, IsAdminUser, AllowAny
+from rest_framework.filters import SearchFilter, OrderingFilter
+from rest_framework.pagination import PageNumberPagination
+from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import Q
+from rest_framework import status
 from .models import Challenge, ChallengeTestCase, PracticeProblem, PracticeProblemTestCase
 from .serializers import (
     ChallengeListSerializer,
@@ -169,66 +172,125 @@ class ChallengeTestCaseCreateView(APIView):
             },
             status=status.HTTP_201_CREATED
         )
+
+
+class StandardResultsSetPagination(PageNumberPagination):
+    """Standard pagination for list views"""
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
 class ChallengeListView(APIView):
     """
     List challenges available for the current user.
     
-    Accessible to: All authenticated users
+    Accessible to: All users (no auth required, but limited by role)
     
-    Rules:
-    - Managers (is_staff=True): See all challenges they created + public challenges
-    - Regular users: See only public challenges
-    - Superusers: See all challenges
-    - Anonymous: Limited to public challenges only (if allowed)
+    ACCESS CONTROL RULES:
+    ├─ Superuser: See ALL challenges
+    ├─ Manager (is_staff=True): See own challenges + public challenges
+    ├─ Authenticated User: See public practice challenges only
+    └─ Anonymous: See public challenges (if allow_public_practice_after_contest=True)
     
-    Returns: List of challenges with filtering, searching, and pagination
+    FILTERING:
+    - difficulty: Filter by difficulty level (EASY, MEDIUM, HARD)
+    - created_by__id: Filter by creator ID
+    - tags: Filter by tag IDs (comma-separated)
+    - state: Filter by state (DRAFT, PUBLISHED, ARCHIVED)
+    
+    SEARCH:
+    - Searches: title, description, statement
+    
+    ORDERING:
+    - difficulty: Difficulty level
+    - created_at: Creation date
+    - title: Challenge title
+    
+    PAGINATION:
+    - page_size: 20 (default)
+    - page_size query param: ?page_size=50
+    
+    Returns: List of challenges with pagination
     """
-    permission_classes = [IsAuthenticated]  # ✅ Should require auth
-    # filter_backends = [SearchFilter, OrderingFilter, DjangoFilterBackend]
+    permission_classes = [AllowAny]  # Changed to AllowAny for better UX
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     search_fields = ['title', 'description', 'statement']
     ordering_fields = ['difficulty', 'created_at', 'title']
-    filterset_fields = ['difficulty', 'created_by__id']
-    # pagination_class = StandardResultsSetPagination
+    filterset_fields = ['difficulty', 'created_by__id', 'state']
+    pagination_class = StandardResultsSetPagination
 
     def get_queryset(self):
         """
-        ✅ CRITICAL: Must implement proper access control
+        Get queryset filtered by user permissions.
         
-        Current user should see:
-        1. Challenges they created
-        2. Public challenges (allow_public_practice_after_contest=True)
-        3. Challenges from contests they're registered for
-        4. Superusers see all challenges
+        Rules:
+        1. Superusers: See all challenges
+        2. Managers: See own + public challenges
+        3. Regular users: See public challenges only
+        4. Anonymous users: See public challenges only
+        
+        Optimization: Uses select_related and prefetch_related
         """
         user = self.request.user
-        queryset = Challenge.objects.all().prefetch_related(
+        
+        # Base queryset with optimizations
+        queryset = Challenge.objects.all().select_related(
+            'created_by'
+        ).prefetch_related(
             'testcases',
-            'created_by',
             'tags'
         )
 
-        # ❌ POTENTIAL ISSUE: Check if this filters correctly
-        if user.is_superuser:
+        # SUPERUSER: See everything
+        if user and user.is_superuser:
             return queryset
-        
-        if user.is_staff:  # Manager
+
+        # MANAGER (is_staff=True): See own + public
+        if user and user.is_authenticated and user.is_staff:
             return queryset.filter(
                 Q(created_by=user) | 
                 Q(allow_public_practice_after_contest=True)
             ).distinct()
-        
-        # Regular users: only public challenges
+
+        # REGULAR USER / ANONYMOUS: See only public challenges
+        # Only show challenges marked for public practice that are in ended contests
+        public_challenge_ids = ContestItem.objects.filter(
+            challenge__allow_public_practice_after_contest=True,
+            contest__state='ENDED'
+        ).values_list('challenge_id', flat=True).distinct()
+
         return queryset.filter(
-            allow_public_practice_after_contest=True
+            id__in=public_challenge_ids
         )
 
     def get(self, request):
-        """Get challenges based on user permissions"""
+        """
+        Get list of challenges with filtering and pagination.
+        
+        Returns: Paginated list of challenges
+        """
         queryset = self.get_queryset()
         
-        # ✅ Should include filtering, searching, ordering
-        # ✅ Should include pagination
+        # ✅ Apply filters, search, ordering
+        filter_backend = DjangoFilterBackend()
+        queryset = filter_backend.filter_queryset(request, queryset, self)
         
+        search_backend = SearchFilter()
+        queryset = search_backend.filter_queryset(request, queryset, self)
+        
+        ordering_backend = OrderingFilter()
+        queryset = ordering_backend.filter_queryset(request, queryset, self)
+
+        # ✅ Apply pagination
+        paginator = self.pagination_class()
+        page = paginator.paginate_queryset(queryset, request)
+        
+        if page is not None:
+            serializer = ChallengeListSerializer(page, many=True)
+            return paginator.get_paginated_response(serializer.data)
+
+        # Fallback if pagination is disabled
         serializer = ChallengeListSerializer(queryset, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 

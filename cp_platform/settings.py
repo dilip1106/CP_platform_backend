@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     'contest',
     'challenges',
     'corsheaders',
+    'django_filters',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
