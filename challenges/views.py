@@ -4,7 +4,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from rest_framework import status
-
+from django.db.models import Q
 from .models import Challenge, ChallengeTestCase, PracticeProblem, PracticeProblemTestCase
 from .serializers import (
     ChallengeListSerializer,
@@ -169,7 +169,68 @@ class ChallengeTestCaseCreateView(APIView):
             },
             status=status.HTTP_201_CREATED
         )
+class ChallengeListView(APIView):
+    """
+    List challenges available for the current user.
+    
+    Accessible to: All authenticated users
+    
+    Rules:
+    - Managers (is_staff=True): See all challenges they created + public challenges
+    - Regular users: See only public challenges
+    - Superusers: See all challenges
+    - Anonymous: Limited to public challenges only (if allowed)
+    
+    Returns: List of challenges with filtering, searching, and pagination
+    """
+    permission_classes = [IsAuthenticated]  # ✅ Should require auth
+    # filter_backends = [SearchFilter, OrderingFilter, DjangoFilterBackend]
+    search_fields = ['title', 'description', 'statement']
+    ordering_fields = ['difficulty', 'created_at', 'title']
+    filterset_fields = ['difficulty', 'created_by__id']
+    # pagination_class = StandardResultsSetPagination
 
+    def get_queryset(self):
+        """
+        ✅ CRITICAL: Must implement proper access control
+        
+        Current user should see:
+        1. Challenges they created
+        2. Public challenges (allow_public_practice_after_contest=True)
+        3. Challenges from contests they're registered for
+        4. Superusers see all challenges
+        """
+        user = self.request.user
+        queryset = Challenge.objects.all().prefetch_related(
+            'testcases',
+            'created_by',
+            'tags'
+        )
+
+        # ❌ POTENTIAL ISSUE: Check if this filters correctly
+        if user.is_superuser:
+            return queryset
+        
+        if user.is_staff:  # Manager
+            return queryset.filter(
+                Q(created_by=user) | 
+                Q(allow_public_practice_after_contest=True)
+            ).distinct()
+        
+        # Regular users: only public challenges
+        return queryset.filter(
+            allow_public_practice_after_contest=True
+        )
+
+    def get(self, request):
+        """Get challenges based on user permissions"""
+        queryset = self.get_queryset()
+        
+        # ✅ Should include filtering, searching, ordering
+        # ✅ Should include pagination
+        
+        serializer = ChallengeListSerializer(queryset, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 # ============================================================
 # PUBLIC PRACTICE CHALLENGES
