@@ -3,29 +3,67 @@ from django.utils.timezone import now
 from django.contrib.auth import get_user_model
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated, IsAdminUser, AllowAny
+from rest_framework.permissions import IsAuthenticated, IsAdminUser, AllowAny, BasePermission
 from rest_framework import status
+import csv
+import io
 
-from .models import Contest, ContestProblem, ContestParticipant, ContestRegistration
+from .models import Contest, ContestItem, ContestParticipant, ContestRegistration
 from .serializers import (
     ContestListSerializer,
     ContestDetailSerializer,
     ContestCreateSerializer,
+    ContestAddItemSerializer,
+    ContestAddManagerSerializer,
     ContestDetailWithRegistrationSerializer,
     ContestRegistrationSerializer,
+    ContestItemSerializer,
 )
-from .permissions import (
-    IsContestManager,
-    CanEditContest,
-    CanAddProblems,
-    CanPublishContest,
-    CanRegisterForContest,
-    IsContestParticipant,
-    CanSubmitSolution,
+from shared.permissions import (
+    IsManager,
+    IsManagerOrSuperUser,
+    IsManagerOfContest,
     IsContestLive,
+    IsContestParticipant,
 )
 
 User = get_user_model()
+
+
+# ============================================================
+# Permission Classes (Local Definitions)
+# ============================================================
+class CanEditContest(IsManagerOfContest):
+    """Only managers can edit DRAFT/SCHEDULED contests"""
+    def has_object_permission(self, request, view, obj):
+        if not super().has_object_permission(request, view, obj):
+            return False
+        return obj.state in ['DRAFT', 'SCHEDULED']
+
+
+class CanPublishContest(IsManagerOfContest):
+    """Only managers can publish DRAFT contests"""
+    def has_object_permission(self, request, view, obj):
+        if not super().has_object_permission(request, view, obj):
+            return False
+        return obj.state == 'DRAFT'
+
+
+class CanRegisterForContest(BasePermission):
+    """User can register before contest starts"""
+    def has_object_permission(self, request, view, obj):
+        return now() < obj.start_time
+
+
+class CanSubmitSolution(BasePermission):
+    """User can submit during contest window"""
+    def has_permission(self, request, view):
+        return request.user and request.user.is_authenticated
+
+
+class IsContestManager(IsManagerOfContest):
+    """Manager of the contest"""
+    pass
 
 
 # ============================================================
@@ -38,7 +76,6 @@ class ContestCreateView(APIView):
         """Create new contest in DRAFT state"""
         serializer = ContestCreateSerializer(data=request.data)
         if serializer.is_valid():
-            # Always create in DRAFT state
             contest = serializer.save(
                 created_by=request.user,
                 state='DRAFT',
@@ -98,7 +135,7 @@ class ContestListWithStatusView(APIView):
                 'end_time': contest.end_time,
                 'status': status_val,
                 'is_public': contest.is_public,
-                'total_problems': contest.contest_problems.count(),
+                'total_items': contest.contest_items.count(),
                 'total_participants': contest.participants.count(),
             })
 
@@ -114,7 +151,6 @@ class ContestSearchView(APIView):
     def get(self, request):
         """Search contests by query"""
         query = request.query_params.get('query', '')
-        status_filter = request.query_params.get('status', '')
 
         contests = Contest.objects.filter(
             is_published=True
@@ -237,7 +273,7 @@ class ContestStatusView(APIView):
 # Update Contest (Only in DRAFT/SCHEDULED, Manager Only)
 # ============================================================
 class ContestUpdateView(APIView):
-    permission_classes = [IsAuthenticated, CanEditContest]
+    permission_classes = [IsAuthenticated]
 
     def get_contest(self):
         return get_object_or_404(Contest, id=self.kwargs["contest_id"])
@@ -245,12 +281,23 @@ class ContestUpdateView(APIView):
     def put(self, request, contest_id):
         """Update contest (DRAFT/SCHEDULED only)"""
         contest = self.get_contest()
-        self.check_object_permissions(request, contest)
+        
+        is_manager = (
+            request.user.is_superuser or
+            contest.created_by == request.user or
+            request.user in contest.managers.all()
+        )
+        
+        if not is_manager or contest.state not in ['DRAFT', 'SCHEDULED']:
+            return Response(
+                {"error": "Cannot update this contest"},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
         serializer = ContestCreateSerializer(
             contest,
             data=request.data,
-            partial=True
+            partial=False
         )
         if serializer.is_valid():
             serializer.save()
@@ -263,7 +310,18 @@ class ContestUpdateView(APIView):
     def patch(self, request, contest_id):
         """Partial update contest"""
         contest = self.get_contest()
-        self.check_object_permissions(request, contest)
+        
+        is_manager = (
+            request.user.is_superuser or
+            contest.created_by == request.user or
+            request.user in contest.managers.all()
+        )
+        
+        if not is_manager or contest.state not in ['DRAFT', 'SCHEDULED']:
+            return Response(
+                {"error": "Cannot update this contest"},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
         serializer = ContestCreateSerializer(
             contest,
@@ -283,7 +341,7 @@ class ContestUpdateView(APIView):
 # Publish Contest (Manager Only, Transition DRAFT → SCHEDULED)
 # ============================================================
 class ContestPublishView(APIView):
-    permission_classes = [IsAuthenticated, CanPublishContest]
+    permission_classes = [IsAuthenticated]
 
     def get_contest(self):
         return get_object_or_404(Contest, id=self.kwargs["contest_id"])
@@ -291,7 +349,18 @@ class ContestPublishView(APIView):
     def post(self, request, contest_id):
         """Publish contest: DRAFT → SCHEDULED"""
         contest = self.get_contest()
-        self.check_object_permissions(request, contest)
+        
+        is_manager = (
+            request.user.is_superuser or
+            contest.created_by == request.user or
+            request.user in contest.managers.all()
+        )
+        
+        if not is_manager:
+            return Response(
+                {"error": "Permission denied"},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
         if contest.state != 'DRAFT':
             return Response(
@@ -299,9 +368,10 @@ class ContestPublishView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        if not ContestProblem.objects.filter(contest=contest).exists():
+        # FIXED: Changed from ContestProblem to ContestItem
+        if not ContestItem.objects.filter(contest=contest).exists():
             return Response(
-                {"error": "Contest must have at least one problem"},
+                {"error": "Contest must have at least one item"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -333,7 +403,6 @@ class ContestAddManagerView(APIView):
         """Add manager to contest"""
         contest = self.get_contest()
 
-        from .serializers import ContestAddManagerSerializer
         serializer = ContestAddManagerSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -367,7 +436,6 @@ class RemoveContestManagerView(APIView):
         """Remove manager from contest"""
         contest = self.get_contest()
 
-        from .serializers import ContestAddManagerSerializer
         serializer = ContestAddManagerSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -389,85 +457,221 @@ class RemoveContestManagerView(APIView):
 
 
 # ============================================================
-# Add Problem to Contest
+# Add Contest Item (Problem or Challenge) - Unified Endpoint
 # ============================================================
-class ContestAddProblemView(APIView):
-    permission_classes = [IsAuthenticated, CanAddProblems]
+class ContestAddItemView(APIView):
+    """Add problem or challenge to contest (unified endpoint)"""
+    permission_classes = [IsAuthenticated, IsManagerOrSuperUser]
 
     def get_contest(self):
         return get_object_or_404(Contest, id=self.kwargs["contest_id"])
 
     def post(self, request, contest_id):
-        """Add problem to contest"""
+        """Add problem or challenge to contest"""
         contest = self.get_contest()
-        self.check_object_permissions(request, contest)
-
-        from .serializers import ContestAddProblemSerializer
-        from problems.models import Problem
-
-        serializer = ContestAddProblemSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        problem = get_object_or_404(
-            Problem,
-            id=serializer.validated_data["problem_id"]
+        
+        # Check manager permission
+        is_manager = (
+            request.user.is_superuser or
+            contest.created_by == request.user or
+            request.user in contest.managers.all()
         )
-
-        if ContestProblem.objects.filter(
-            contest=contest,
-            problem=problem
-        ).exists():
+        
+        if not is_manager:
             return Response(
-                {"error": "Problem already in contest"},
+                {"error": "Permission denied"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        if contest.state not in ['DRAFT', 'SCHEDULED']:
+            return Response(
+                {"error": f"Cannot add items to {contest.state} contest"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        ContestProblem.objects.create(
+        serializer = ContestAddItemSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        item_type = serializer.validated_data['item_type']
+        item_id = serializer.validated_data['item_id']
+        order = serializer.validated_data['order']
+        score = serializer.validated_data.get('score', 100)
+
+        # Validate and get the item
+        if item_type == 'PROBLEM':
+            from problems.models import Problem
+            try:
+                item = Problem.objects.get(id=item_id)
+            except Problem.DoesNotExist:
+                return Response(
+                    {"error": "Problem not found"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+        else:  # CHALLENGE
+            from challenges.models import Challenge
+            try:
+                item = Challenge.objects.get(id=item_id)
+            except Challenge.DoesNotExist:
+                return Response(
+                    {"error": "Challenge not found"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Challenge creator must be manager of contest or superuser
+            if item.created_by != request.user and not request.user.is_superuser:
+                return Response(
+                    {"error": "You can only add your own challenges"},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+        # Check if already added
+        existing = ContestItem.objects.filter(
             contest=contest,
-            problem=problem,
-            order=serializer.validated_data.get("order", 1),
+            item_type=item_type
+        ).filter(
+            problem=item if item_type == 'PROBLEM' else None,
+            challenge=item if item_type == 'CHALLENGE' else None
+        ).exists()
+
+        if existing:
+            return Response(
+                {"error": f"{item_type} already in contest"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Create ContestItem
+        try:
+            contest_item = ContestItem.objects.create(
+                contest=contest,
+                problem=item if item_type == 'PROBLEM' else None,
+                challenge=item if item_type == 'CHALLENGE' else None,
+                item_type=item_type,
+                order=order,
+                score=score
+            )
+            
+            return Response(
+                {
+                    "message": f"{item_type} added successfully",
+                    "contest_item": ContestItemSerializer(contest_item).data
+                },
+                status=status.HTTP_201_CREATED
+            )
+        except Exception as e:
+            return Response(
+                {"error": f"Failed to add item: {str(e)}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+
+# Keep for backward compatibility - redirect to ContestAddItemView
+class ContestAddProblemView(APIView):
+    """DEPRECATED: Use ContestAddItemView instead"""
+    permission_classes = [IsAuthenticated, IsManagerOrSuperUser]
+
+    def get_contest(self):
+        return get_object_or_404(Contest, id=self.kwargs["contest_id"])
+
+    def post(self, request, contest_id):
+        """Add problem to contest (DEPRECATED)"""
+        # Convert to new unified format
+        if hasattr(request.data, '_mutable'):
+            request.data._mutable = True
+        request.data['item_type'] = 'PROBLEM'
+        if 'problem_id' in request.data:
+            request.data['item_id'] = request.data.pop('problem_id')
+        
+        # Call unified endpoint
+        view = ContestAddItemView.as_view()
+        return view(request, contest_id=contest_id)
+
+
+# ============================================================
+# Remove Contest Item (Problem or Challenge)
+# ============================================================
+class RemoveContestItemView(APIView):
+    """Remove problem or challenge from contest"""
+    permission_classes = [IsAuthenticated, IsManagerOrSuperUser]
+
+    def get_contest(self):
+        return get_object_or_404(Contest, id=self.kwargs["contest_id"])
+
+    def delete(self, request, contest_id, item_id):
+        """Remove item from contest"""
+        contest = self.get_contest()
+        
+        # Check manager permission
+        is_manager = (
+            request.user.is_superuser or
+            contest.created_by == request.user or
+            request.user in contest.managers.all()
         )
+        
+        if not is_manager:
+            return Response(
+                {"error": "Permission denied"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        try:
+            contest_item = ContestItem.objects.get(id=item_id, contest=contest)
+        except ContestItem.DoesNotExist:
+            return Response(
+                {"error": "Item not found in contest"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        item_type = contest_item.item_type
+        item_title = contest_item.get_item().title
+        
+        contest_item.delete()
 
         return Response(
-            {"message": "Problem added successfully"},
-            status=status.HTTP_201_CREATED
+            {
+                "message": f"{item_type} removed successfully",
+                "removed_item": {
+                    "type": item_type,
+                    "title": item_title,
+                    "id": item_id
+                }
+            },
+            status=status.HTTP_200_OK
         )
 
 
-# ============================================================
-# Remove Problem from Contest
-# ============================================================
+# Keep for backward compatibility - redirect to RemoveContestItemView
 class RemoveContestProblemView(APIView):
-    permission_classes = [IsAuthenticated, CanAddProblems]
+    """DEPRECATED: Use RemoveContestItemView instead"""
+    permission_classes = [IsAuthenticated, IsManagerOrSuperUser]
 
     def get_contest(self):
         return get_object_or_404(Contest, id=self.kwargs["contest_id"])
 
     def delete(self, request, contest_id, problem_id):
-        """Remove problem from contest"""
-        contest = self.get_contest()
-        self.check_object_permissions(request, contest)
-
-        contest_problem = get_object_or_404(
-            ContestProblem,
-            contest=contest,
-            problem_id=problem_id
-        )
-
-        contest_problem.delete()
-
-        return Response(
-            {"message": "Problem removed successfully"},
-            status=status.HTTP_200_OK
-        )
+        """Remove problem from contest (DEPRECATED)"""
+        try:
+            contest = self.get_contest()
+            contest_item = ContestItem.objects.get(
+                contest=contest,
+                problem_id=problem_id
+            )
+            
+            # Call unified endpoint
+            view = RemoveContestItemView.as_view()
+            return view(request, contest_id=contest_id, item_id=contest_item.id)
+        except ContestItem.DoesNotExist:
+            return Response(
+                {"error": "Problem not found in contest"},
+                status=status.HTTP_404_NOT_FOUND
+            )
 
 
 # ============================================================
 # Register for Contest
 # ============================================================
 class ContestRegisterView(APIView):
-    permission_classes = [IsAuthenticated, CanRegisterForContest]
+    permission_classes = [IsAuthenticated]
 
     def get_contest(self):
         return get_object_or_404(Contest, id=self.kwargs["contest_id"])
@@ -475,7 +679,12 @@ class ContestRegisterView(APIView):
     def post(self, request, contest_id):
         """Register for contest"""
         contest = self.get_contest()
-        self.check_object_permissions(request, contest)
+
+        if now() >= contest.start_time:
+            return Response(
+                {"error": "Contest has already started"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         if ContestRegistration.objects.filter(
             contest=contest,
@@ -575,7 +784,7 @@ class ContestRegistrationStatusView(APIView):
 # List Contest Registrations (Manager Only)
 # ============================================================
 class ContestRegistrationsListView(APIView):
-    permission_classes = [IsAuthenticated, IsContestManager]
+    permission_classes = [IsAuthenticated]
 
     def get_contest(self):
         return get_object_or_404(Contest, id=self.kwargs["contest_id"])
@@ -583,7 +792,18 @@ class ContestRegistrationsListView(APIView):
     def get(self, request, contest_id):
         """List all registrations for contest"""
         contest = self.get_contest()
-        self.check_object_permissions(request, contest)
+        
+        is_manager = (
+            request.user.is_superuser or
+            contest.created_by == request.user or
+            request.user in contest.managers.all()
+        )
+        
+        if not is_manager:
+            return Response(
+                {"error": "Permission denied"},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
         registrations = ContestRegistration.objects.filter(
             contest=contest
@@ -720,63 +940,127 @@ class ContestLeaveView(APIView):
 
 
 # ============================================================
-# Get Contest Problems
+# Get Contest Items (Problems + Challenges)
 # ============================================================
 class ContestProblemListView(APIView):
-    permission_classes = [IsAuthenticated, IsContestLive, IsContestParticipant]
+    """Get contest items (problems + challenges)"""
+    permission_classes = [IsAuthenticated]
 
     def get_contest(self):
         return get_object_or_404(Contest, slug=self.kwargs["slug"])
 
     def get(self, request, slug):
-        """Get contest problems (only LIVE)"""
+        """Get contest items"""
         contest = self.get_contest()
+        
+        # Check if user is participant or manager
+        is_participant = ContestParticipant.objects.filter(
+            contest=contest,
+            user=request.user
+        ).exists()
+        
+        is_manager = (
+            request.user.is_superuser or
+            contest.created_by == request.user or
+            request.user in contest.managers.all()
+        )
+        
+        if not (is_participant or is_manager) or contest.state != 'LIVE':
+            return Response(
+                {"error": "Cannot access contest items"},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
-        problems = ContestProblem.objects.filter(
-            contest=contest
-        ).order_by("order")
-
-        from .serializers import ContestProblemSerializer
-        serializer = ContestProblemSerializer(problems, many=True)
+        items = contest.contest_items.all().order_by("order")
+        
+        serializer = ContestItemSerializer(items, many=True)
         return Response(serializer.data)
 
 
 # ============================================================
-# Get Contest Problem Details
+# Get Contest Item Details (Replaces ContestProblemDetailView)
 # ============================================================
-class ContestProblemDetailView(APIView):
-    permission_classes = [IsAuthenticated, IsContestLive, IsContestParticipant]
+class ContestItemDetailView(APIView):
+    """Get problem or challenge detail from contest"""
+    permission_classes = [IsAuthenticated]
 
     def get_contest(self):
         return get_object_or_404(Contest, slug=self.kwargs["contest_slug"])
 
-    def get(self, request, contest_slug, problem_slug):
-        """Get problem details (LIVE only)"""
+    def get(self, request, contest_slug, item_slug):
+        """Get item (problem/challenge) details"""
         contest = self.get_contest()
-
-        from problems.models import Problem
-        problem = get_object_or_404(Problem, slug=problem_slug)
-
-        # Verify problem is in contest
-        if not ContestProblem.objects.filter(
+        
+        # Check if user is participant or manager
+        is_participant = ContestParticipant.objects.filter(
             contest=contest,
-            problem=problem
-        ).exists():
+            user=request.user
+        ).exists()
+        
+        is_manager = (
+            request.user.is_superuser or
+            contest.created_by == request.user or
+            request.user in contest.managers.all()
+        )
+        
+        if not (is_participant or is_manager) or contest.state != 'LIVE':
             return Response(
-                {"error": "Problem not found in contest"},
-                status=status.HTTP_404_NOT_FOUND
+                {"error": "Cannot access contest items"},
+                status=status.HTTP_403_FORBIDDEN
             )
 
-        from problems.serializers import ProblemDetailSerializer
-        serializer = ProblemDetailSerializer(problem)
-        return Response(serializer.data)
+        from problems.models import Problem
+        from challenges.models import Challenge
+        
+        # Try problem first
+        try:
+            problem = Problem.objects.get(slug=item_slug)
+            if ContestItem.objects.filter(
+                contest=contest,
+                problem=problem
+            ).exists():
+                from problems.serializers import ProblemDetailSerializer
+                serializer = ProblemDetailSerializer(
+                    problem,
+                    context={'request': request}
+                )
+                return Response(serializer.data)
+        except Problem.DoesNotExist:
+            pass
+
+        # Try challenge
+        try:
+            challenge = Challenge.objects.get(slug=item_slug)
+            if ContestItem.objects.filter(
+                contest=contest,
+                challenge=challenge
+            ).exists():
+                from challenges.serializers import ChallengeDetailSerializer
+                serializer = ChallengeDetailSerializer(
+                    challenge,
+                    context={'request': request}
+                )
+                return Response(serializer.data)
+        except Challenge.DoesNotExist:
+            pass
+
+        return Response(
+            {"error": "Item not found in contest"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+
+# Keep for backward compatibility - redirect to ContestItemDetailView
+class ContestProblemDetailView(ContestItemDetailView):
+    """DEPRECATED: Use ContestItemDetailView instead"""
+    pass
 
 
 # ============================================================
 # Submit Solution (LIVE State + Time Window Only)
 # ============================================================
 class ContestSubmissionCreateView(APIView):
-    permission_classes = [IsAuthenticated, CanSubmitSolution]
+    permission_classes = [IsAuthenticated]
 
     def get_contest(self):
         return get_object_or_404(
@@ -804,8 +1088,8 @@ class ContestSubmissionCreateView(APIView):
 
         problem = get_object_or_404(Problem, slug=problem_slug)
 
-        # Verify problem is in contest
-        if not ContestProblem.objects.filter(
+        # Verify problem is in contest using ContestItem
+        if not ContestItem.objects.filter(
             contest=contest,
             problem=problem
         ).exists():
@@ -839,7 +1123,7 @@ class ContestSubmissionCreateView(APIView):
 # Get User Submissions for Contest Problem
 # ============================================================
 class UserSubmissionsView(APIView):
-    permission_classes = [IsAuthenticated, IsContestLive, IsContestParticipant]
+    permission_classes = [IsAuthenticated]
 
     def get_contest(self):
         return get_object_or_404(Contest, slug=self.kwargs["contest_slug"])
@@ -847,6 +1131,24 @@ class UserSubmissionsView(APIView):
     def get(self, request, contest_slug, problem_slug):
         """Get user submissions for problem"""
         contest = self.get_contest()
+        
+        # Check if user is participant or manager
+        is_participant = ContestParticipant.objects.filter(
+            contest=contest,
+            user=request.user
+        ).exists()
+        
+        is_manager = (
+            request.user.is_superuser or
+            contest.created_by == request.user or
+            request.user in contest.managers.all()
+        )
+        
+        if not (is_participant or is_manager):
+            return Response(
+                {"error": "Permission denied"},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
         from problems.models import Problem
         from submissions.models import Submission
@@ -879,8 +1181,10 @@ class SubmissionDetailView(APIView):
         # Only user or manager can view
         is_manager = (
             request.user.is_staff or
-            submission.contest.created_by == request.user or
-            request.user in submission.contest.managers.all()
+            (submission.contest and (
+                submission.contest.created_by == request.user or
+                request.user in submission.contest.managers.all()
+            ))
         )
 
         if submission.user != request.user and not is_manager:
@@ -905,7 +1209,6 @@ class ContestLeaderboardView(APIView):
         contest = get_object_or_404(Contest, slug=contest_slug)
 
         from submissions.models import Submission
-        from django.db.models import Count, Q
 
         # Get all successful submissions
         submissions = Submission.objects.filter(
@@ -960,14 +1263,14 @@ class UserContestStatsView(APIView):
             contest=contest
         )
 
-        total_problems = contest.contest_problems.count()
+        total_items = contest.contest_items.count()
         problems_solved = submissions.filter(status='AC').values('problem').distinct().count()
         total_attempts = submissions.count()
 
         data = {
             'user': request.user.username,
             'contest': contest.title,
-            'total_problems': total_problems,
+            'total_items': total_items,
             'problems_solved': problems_solved,
             'total_attempts': total_attempts,
             'best_submission_time': submissions.filter(status='AC').first().created_at if submissions.filter(status='AC').exists() else None,
@@ -980,7 +1283,14 @@ class UserContestStatsView(APIView):
 # Manager: View All Contest Submissions
 # ============================================================
 class ManagerContestSubmissionsView(APIView):
-    permission_classes = [IsAuthenticated, IsContestManager]
+    """
+    Manager endpoint to view all contest submissions.
+    
+    Rules:
+    - Only contest manager can access
+    - Returns user + code + verdict + failed testcases
+    """
+    permission_classes = [IsAuthenticated]
 
     def get_contest(self):
         return get_object_or_404(Contest, id=self.kwargs["contest_id"])
@@ -988,16 +1298,39 @@ class ManagerContestSubmissionsView(APIView):
     def get(self, request, contest_id):
         """View all contest submissions"""
         contest = self.get_contest()
-        self.check_object_permissions(request, contest)
+        
+        # Verify manager permission
+        is_manager = (
+            request.user.is_superuser or
+            contest.created_by == request.user or
+            request.user in contest.managers.all()
+        )
+        
+        if not is_manager:
+            return Response(
+                {"error": "Permission denied"},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
         from submissions.models import Submission
+        from submissions.serializers import SubmissionSerializer
 
+        # Get all submissions with optimization
         submissions = Submission.objects.filter(
             contest=contest
-        ).order_by('-created_at')
+        ).select_related(
+            'user',
+            'problem',
+            'contest_item',
+            'contest_item__problem',
+            'contest_item__challenge'
+        ).prefetch_related('results').order_by('-created_at')
 
-        from submissions.serializers import SubmissionSerializer
-        serializer = SubmissionSerializer(submissions, many=True)
+        serializer = SubmissionSerializer(
+            submissions,
+            many=True,
+            context={'request': request}
+        )
         return Response(serializer.data)
 
 
@@ -1005,7 +1338,7 @@ class ManagerContestSubmissionsView(APIView):
 # Manager: View Submission Code
 # ============================================================
 class ManagerViewSubmissionCodeView(APIView):
-    permission_classes = [IsAuthenticated, IsContestManager]
+    permission_classes = [IsAuthenticated]
 
     def get_contest(self):
         return get_object_or_404(Contest, id=self.kwargs["contest_id"])
@@ -1013,7 +1346,18 @@ class ManagerViewSubmissionCodeView(APIView):
     def get(self, request, contest_id, submission_id):
         """View submission source code"""
         contest = self.get_contest()
-        self.check_object_permissions(request, contest)
+        
+        is_manager = (
+            request.user.is_superuser or
+            contest.created_by == request.user or
+            request.user in contest.managers.all()
+        )
+        
+        if not is_manager:
+            return Response(
+                {"error": "Permission denied"},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
         from submissions.models import Submission
 
@@ -1024,7 +1368,7 @@ class ManagerViewSubmissionCodeView(APIView):
         )
 
         from submissions.serializers import SubmissionSerializer
-        serializer = SubmissionSerializer(submission)
+        serializer = SubmissionSerializer(submission, context={'request': request})
         return Response(serializer.data)
 
 
@@ -1032,7 +1376,7 @@ class ManagerViewSubmissionCodeView(APIView):
 # Manager: Contest Leaderboard
 # ============================================================
 class ManagerContestLeaderboardView(APIView):
-    permission_classes = [IsAuthenticated, IsContestManager]
+    permission_classes = [IsAuthenticated]
 
     def get_contest(self):
         return get_object_or_404(Contest, id=self.kwargs["contest_id"])
@@ -1040,7 +1384,18 @@ class ManagerContestLeaderboardView(APIView):
     def get(self, request, contest_id):
         """View contest leaderboard (manager)"""
         contest = self.get_contest()
-        self.check_object_permissions(request, contest)
+        
+        is_manager = (
+            request.user.is_superuser or
+            contest.created_by == request.user or
+            request.user in contest.managers.all()
+        )
+        
+        if not is_manager:
+            return Response(
+                {"error": "Permission denied"},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
         from submissions.models import Submission
 
@@ -1090,7 +1445,7 @@ class ManagerContestLeaderboardView(APIView):
 # Manager: Submission Analytics
 # ============================================================
 class ManagerSubmissionAnalyticsView(APIView):
-    permission_classes = [IsAuthenticated, IsContestManager]
+    permission_classes = [IsAuthenticated]
 
     def get_contest(self):
         return get_object_or_404(Contest, id=self.kwargs["contest_id"])
@@ -1098,7 +1453,18 @@ class ManagerSubmissionAnalyticsView(APIView):
     def get(self, request, contest_id):
         """Get submission analytics"""
         contest = self.get_contest()
-        self.check_object_permissions(request, contest)
+        
+        is_manager = (
+            request.user.is_superuser or
+            contest.created_by == request.user or
+            request.user in contest.managers.all()
+        )
+        
+        if not is_manager:
+            return Response(
+                {"error": "Permission denied"},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
         from submissions.models import Submission
         from django.db.models import Count
@@ -1119,7 +1485,7 @@ class ManagerSubmissionAnalyticsView(APIView):
 # Manager: Export Contest Data
 # ============================================================
 class ManagerExportContestDataView(APIView):
-    permission_classes = [IsAuthenticated, IsContestManager]
+    permission_classes = [IsAuthenticated]
 
     def get_contest(self):
         return get_object_or_404(Contest, id=self.kwargs["contest_id"])
@@ -1127,7 +1493,18 @@ class ManagerExportContestDataView(APIView):
     def get(self, request, contest_id):
         """Export contest data"""
         contest = self.get_contest()
-        self.check_object_permissions(request, contest)
+        
+        is_manager = (
+            request.user.is_superuser or
+            contest.created_by == request.user or
+            request.user in contest.managers.all()
+        )
+        
+        if not is_manager:
+            return Response(
+                {"error": "Permission denied"},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
         format_type = request.query_params.get('format', 'json')
 
@@ -1140,15 +1517,13 @@ class ManagerExportContestDataView(APIView):
             data.append({
                 'username': sub.user.username,
                 'email': sub.user.email,
-                'problem': sub.problem.title,
+                'problem': sub.problem.title if sub.problem else 'N/A',
                 'language': sub.language,
                 'status': sub.status,
                 'created_at': sub.created_at
             })
 
         if format_type == 'csv':
-            import csv
-            import io
             output = io.StringIO()
             writer = csv.DictWriter(output, fieldnames=['username', 'email', 'problem', 'language', 'status', 'created_at'])
             writer.writeheader()
@@ -1164,36 +1539,3 @@ class ManagerExportContestDataView(APIView):
             'export_date': now(),
             'data': data
         })
-
-
-# ============================================================
-# Automatic State Transition Service
-# ============================================================
-class ContestStateTransitionService:
-    """
-    Service to automatically transition contests based on current time.
-    Should be run via Celery periodic task or management command.
-    """
-    
-    @staticmethod
-    def update_contest_states():
-        """Update contest states based on current time"""
-        current_time = now()
-
-        contests_to_go_live = Contest.objects.filter(
-            state='SCHEDULED',
-            start_time__lte=current_time,
-            end_time__gt=current_time
-        )
-        count_live = contests_to_go_live.update(state='LIVE')
-
-        contests_to_end = Contest.objects.filter(
-            state='LIVE',
-            end_time__lte=current_time
-        )
-        count_ended = contests_to_end.update(state='ENDED')
-
-        return {
-            "contests_went_live": count_live,
-            "contests_ended": count_ended,
-        }

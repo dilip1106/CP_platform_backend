@@ -1,12 +1,8 @@
 from rest_framework.permissions import BasePermission
-from .models import Challenge, PracticeProblem
 
 
 class IsManager(BasePermission):
-    """
-    User is a manager (is_staff or is_superuser).
-    Managers can create challenges.
-    """
+    """User is a manager (is_staff=True)"""
     def has_permission(self, request, view):
         return request.user and request.user.is_staff
 
@@ -14,30 +10,43 @@ class IsManager(BasePermission):
 class IsChallengeCreator(BasePermission):
     """Only challenge creator can edit/delete"""
     def has_object_permission(self, request, view, obj):
-        return obj.created_by == request.user or request.user.is_staff
+        return obj.created_by == request.user or request.user.is_superuser
 
 
 class IsSuperUserOnly(BasePermission):
-    """Only superusers can create practice problems"""
+    """Only superusers allowed"""
     def has_permission(self, request, view):
         return request.user and request.user.is_superuser
 
 
-class IsPracticeProblemOwnerOrSuperuser(BasePermission):
-    """Only superuser can edit/delete practice problems"""
+class CanViewChallenge(BasePermission):
+    """
+    Only creator, superuser, or contest participants can view challenge.
+    Rules:
+    - Creator always sees their challenge
+    - Superusers always see all challenges
+    - Users see challenges ONLY inside LIVE contests they participate in
+    """
     def has_object_permission(self, request, view, obj):
-        return request.user.is_superuser
-
-
-class IsAuthenticatedOrReadOnly(BasePermission):
-    """Allow read-only access to everyone, authenticated for write"""
-    def has_permission(self, request, view):
-        if request.method == 'GET':
+        # Challenge creator or superuser
+        if obj.created_by == request.user or request.user.is_superuser:
             return True
-        return request.user and request.user.is_authenticated
-
-
-class IsPracticeProblemCreator(BasePermission):
-    """Only problem creator (superuser) can edit/delete"""
-    def has_object_permission(self, request, view, obj):
-        return obj.created_by == request.user or request.user.is_staff
+        
+        # Check if user is accessing challenge inside a contest
+        from contest.models import Contest, ContestItem, ContestParticipant
+        from django.utils.timezone import now
+        
+        # Find contests with this challenge that are LIVE
+        contest_items = ContestItem.objects.filter(
+            challenge=obj,
+            contest__state='LIVE'
+        )
+        
+        for item in contest_items:
+            if ContestParticipant.objects.filter(
+                contest=item.contest,
+                user=request.user
+            ).exists():
+                return True
+        
+        return False

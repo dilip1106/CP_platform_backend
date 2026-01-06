@@ -14,7 +14,7 @@ from .serializers import (
     PracticeProblemDetailSerializer,
     PracticeProblemCreateUpdateSerializer,
 )
-from .permissions import IsChallengeCreator, IsSuperUserOnly, IsPracticeProblemCreator
+from .permissions import IsChallengeCreator, IsSuperUserOnly
 from contest.models import Contest
 
 
@@ -122,6 +122,16 @@ class ChallengeTestCaseCreateView(APIView):
 # PUBLIC PRACTICE CHALLENGES
 # (Auto-visible after contest ends)
 # ============================================================
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from rest_framework import status
+from django.shortcuts import get_object_or_404
+
+from challenges.models import Challenge
+from contest.models import ContestItem
+from .serializers import ChallengeListSerializer, ChallengeDetailSerializer
+
 
 class PublicPracticeChallengesView(APIView):
     """
@@ -138,21 +148,14 @@ class PublicPracticeChallengesView(APIView):
             allow_public_practice_after_contest=True
         )
 
-        # Filter by contests that are ENDED
-        from contest.models import ContestChallenge
-        public_challenge_ids = set()
+        # Filter by challenges that are in any ENDED contest
+        from django.utils.timezone import now
+        ended_contest_item_ids = ContestItem.objects.filter(
+            challenge__in=challenges,
+            contest__state='ENDED'
+        ).values_list('challenge_id', flat=True).distinct()
 
-        for challenge in challenges:
-            # Check if this challenge is in any ENDED contest
-            is_in_ended_contest = ContestChallenge.objects.filter(
-                challenge=challenge,
-                contest__state='ENDED'
-            ).exists()
-
-            if is_in_ended_contest:
-                public_challenge_ids.add(challenge.id)
-
-        challenges = challenges.filter(id__in=public_challenge_ids)
+        challenges = challenges.filter(id__in=ended_contest_item_ids)
 
         serializer = ChallengeListSerializer(challenges, many=True)
         return Response(serializer.data)
@@ -173,8 +176,7 @@ class PublicPracticeChallengeDetailView(APIView):
             )
 
         # Verify associated contest is ENDED
-        from contest.models import ContestChallenge
-        is_in_ended_contest = ContestChallenge.objects.filter(
+        is_in_ended_contest = ContestItem.objects.filter(
             challenge=challenge,
             contest__state='ENDED'
         ).exists()
@@ -187,7 +189,6 @@ class PublicPracticeChallengeDetailView(APIView):
 
         serializer = ChallengeDetailSerializer(challenge)
         return Response(serializer.data)
-
 
 # ============================================================
 # SUPERUSER PRACTICE PROBLEM APIS

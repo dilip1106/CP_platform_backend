@@ -1,5 +1,7 @@
 from django.contrib import admin
-from .models import Challenge, ChallengeTestCase, PracticeProblem, PracticeProblemTestCase, Tag, ContestChallenge
+from .models import Challenge, ChallengeTestCase, PracticeProblem, PracticeProblemTestCase
+from problems.models import Tag
+from contest.models import ContestItem
 
 
 @admin.register(Tag)
@@ -31,16 +33,16 @@ class PracticeProblemAdmin(admin.ModelAdmin):
     readonly_fields = ['created_at', 'updated_at']
     filter_horizontal = ['tags']
 
+@admin.register(ContestItem)
+class ContestItemAdmin(admin.ModelAdmin):
+    list_display = ['contest', 'get_item_name', 'order', 'score', 'get_item_type']
+    list_filter = ['contest']  # remove 'item_type'
+    search_fields = ['problem__title', 'challenge__title']
 
-@admin.register(PracticeProblemTestCase)
-class PracticeProblemTestCaseAdmin(admin.ModelAdmin):
-    list_display = ['problem', 'is_sample']
-    list_filter = ['is_sample']
-    search_fields = ['problem__title']
+    def get_item_name(self, obj):
+        return obj.get_item().title
+    get_item_name.short_description = "Item"
 
-
-@admin.register(ContestChallenge)
-class ContestChallengeAdmin(admin.ModelAdmin):
-    list_display = ['contest', 'challenge', 'order', 'score', 'time_limit']
-    list_filter = ['contest', 'order']
-    search_fields = ['challenge__title', 'contest__title']
+    def get_item_type(self, obj):
+        return obj.item_type
+    get_item_type.short_description = "Item Type"

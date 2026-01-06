@@ -5,33 +5,36 @@ from .views import (
     ContestDetailWithRegistrationView,
     ContestCreateView,
     ContestAddManagerView,
-    ContestAddProblemView,
+    RemoveContestManagerView,
+    ContestAddItemView,  # NEW: Unified endpoint
+    ContestAddProblemView,  # DEPRECATED: For backward compatibility
+    RemoveContestItemView,  # NEW: Unified endpoint
+    RemoveContestProblemView,  # DEPRECATED: For backward compatibility
     ContestRegisterView,
     ContestUnregisterView,
     ContestRegistrationStatusView,
     ContestRegistrationsListView,
     UserRegisteredContestsView,
     ContestProblemListView,
-    ContestProblemDetailView,
+    ContestItemDetailView,  # NEW: Unified endpoint
+    ContestProblemDetailView,  # DEPRECATED: For backward compatibility
     ContestLeaderboardView,
     ContestSubmissionCreateView,
     ContestStatusView,
     ContestLeaveView,
     ContestUpdateView,
-    RemoveContestProblemView,
-    RemoveContestManagerView,
     UserSubmissionsView,
     SubmissionDetailView,
     UserContestStatsView,
     ContestSearchView,
     ContestListWithStatusView,
     ContestJoinView,
+    ContestPublishView,
     ManagerContestSubmissionsView,
     ManagerViewSubmissionCodeView,
     ManagerContestLeaderboardView,
     ManagerSubmissionAnalyticsView,
     ManagerExportContestDataView,
-    ContestPublishView,
 )
 
 urlpatterns = [
@@ -93,7 +96,7 @@ urlpatterns = [
     ),
 
     # -------------------------
-    # Contest Registration (NEW!)
+    # Contest Registration
     # -------------------------
     path(
         "contests/<int:contest_id>/register/",
@@ -149,12 +152,28 @@ urlpatterns = [
         name="contest-remove-manager"
     ),
 
+    # NEW: Unified endpoint for adding items
+    path(
+        "contests/<int:contest_id>/add-item/",
+        ContestAddItemView.as_view(),
+        name="contest-add-item"
+    ),
+
+    # DEPRECATED: For backward compatibility
     path(
         "contests/<int:contest_id>/add-problem/",
         ContestAddProblemView.as_view(),
         name="contest-add-problem"
     ),
 
+    # NEW: Unified endpoint for removing items
+    path(
+        "contests/<int:contest_id>/remove-item/<int:item_id>/",
+        RemoveContestItemView.as_view(),
+        name="contest-remove-item"
+    ),
+
+    # DEPRECATED: For backward compatibility
     path(
         "contests/<int:contest_id>/remove-problem/<int:problem_id>/",
         RemoveContestProblemView.as_view(),
@@ -162,14 +181,22 @@ urlpatterns = [
     ),
 
     # -------------------------
-    # Contest Problems
+    # Contest Items (Problems + Challenges)
     # -------------------------
     path(
-        "contests/<slug:slug>/problems/",
+        "contests/<slug:slug>/items/",
         ContestProblemListView.as_view(),
-        name="contest-problem-list"
+        name="contest-item-list"
     ),
 
+    # NEW: Unified endpoint
+    path(
+        "contests/<slug:contest_slug>/items/<slug:item_slug>/",
+        ContestItemDetailView.as_view(),
+        name="contest-item-detail"
+    ),
+
+    # DEPRECATED: For backward compatibility
     path(
         "contests/<slug:contest_slug>/problems/<slug:problem_slug>/",
         ContestProblemDetailView.as_view(),
@@ -213,7 +240,7 @@ urlpatterns = [
     ),
 
     # -------------------------
-    # Manager Views (NEW!)
+    # Manager Views
     # -------------------------
     path(
         "contests/<int:contest_id>/manager/submissions/",

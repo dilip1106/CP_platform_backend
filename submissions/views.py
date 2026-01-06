@@ -2,12 +2,18 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import status
+from django.shortcuts import get_object_or_404
 
-from .models import Submission
-from .serializers import SubmissionCreateSerializer, SubmissionSerializer
+from .models import Submission, SubmissionResult
+from .serializers import (
+    SubmissionCreateSerializer,
+    SubmissionSerializer,
+    SubmissionResultSerializer
+)
 
 
 class SubmissionCreateView(APIView):
+    """Create a new submission"""
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -15,18 +21,64 @@ class SubmissionCreateView(APIView):
         if serializer.is_valid():
             submission = serializer.save(user=request.user)
             return Response(
-                SubmissionSerializer(submission).data,
+                SubmissionSerializer(
+                    submission,
+                    context={'request': request}
+                ).data,
                 status=status.HTTP_201_CREATED
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 class UserSubmissionListView(APIView):
+    """Get user's submissions (optimized query)"""
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        submissions = Submission.objects.filter(user=request.user).order_by('-created_at')
-        serializer = SubmissionSerializer(submissions, many=True)
+        # Query optimization: select_related + prefetch_related
+        submissions = Submission.objects.filter(
+            user=request.user
+        ).select_related(
+            'problem',
+            'contest',
+            'contest_item'
+        ).prefetch_related('results').order_by('-created_at')
+        
+        serializer = SubmissionSerializer(
+            submissions,
+            many=True,
+            context={'request': request}
+        )
+        return Response(serializer.data)
+
+
+class SubmissionDetailView(APIView):
+    """Get submission detail (with access control)"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, submission_id):
+        submission = get_object_or_404(Submission, id=submission_id)
+
+        # Access control: owner or manager
+        is_owner = submission.user == request.user
+        is_manager = (
+            request.user.is_superuser or
+            (submission.contest and (
+                submission.contest.created_by == request.user or
+                request.user in submission.contest.managers.all()
+            ))
+        )
+
+        if not is_owner and not is_manager:
+            return Response(
+                {"error": "Permission denied"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        serializer = SubmissionSerializer(
+            submission,
+            context={'request': request}
+        )
         return Response(serializer.data)
     
 

@@ -1,19 +1,23 @@
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
 from django.db import models
 from .managers import UserManager
-
+from django.utils import timezone
 class User(AbstractBaseUser, PermissionsMixin):
     # Remove UUID primary key
     # user_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-
+    ROLE_CHOICES = (
+        ('SUPERUSER', 'Superuser'),
+        ('MANAGER', 'Manager'),
+        ('USER', 'User'),
+    )
     username = models.CharField(max_length=50, unique=True)
     email = models.EmailField(unique=True)
-    password = models.TextField()
+    password = models.CharField(max_length=128)
     full_name = models.CharField(max_length=100, blank=True, null=True)
     country = models.CharField(max_length=100, blank=True, null=True)
     rating = models.IntegerField(default=1200,null=True,blank=True)
     is_admin = models.BooleanField(default=False)
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(default=timezone.now)
 
     objects = UserManager()
 
@@ -38,10 +42,35 @@ class User(AbstractBaseUser, PermissionsMixin):
         help_text='Specific permissions for this user.',
         verbose_name='user permissions',
     )
+    
+
+    role = models.CharField(
+        max_length=20,
+        choices=ROLE_CHOICES,
+        default='USER',
+        db_index=True
+    )
+
 
     @property
     def is_staff(self):
-        return self.is_admin
+        return self.is_admin or self.role == 'MANAGER'
+    @property
+    def is_manager(self):
+        return self.role == 'MANAGER'
+
+    @property
+    def is_regular_user(self):
+        return self.role == 'USER'
+
+
+    def save(self, *args, **kwargs):
+        # Keep role and is_superuser in sync
+        if self.is_superuser:
+            self.role = 'SUPERUSER'
+            self.is_admin = True
+        super().save(*args, **kwargs)
+
 
 class UserStatistics(models.Model):
     user = models.OneToOneField(

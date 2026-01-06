@@ -1,10 +1,64 @@
 from rest_framework import serializers
 from django.utils.timezone import now
-from .models import Contest, ContestProblem, ContestRegistration,ContestParticipant
+from .models import Contest, ContestItem, ContestRegistration, ContestParticipant
 from problems.models import Problem
 
 
+class ContestAddItemSerializer(serializers.Serializer):
+    """
+    Serializer for adding problem or challenge to contest.
+    
+    Rules:
+    - item_type: 'PROBLEM' or 'CHALLENGE'
+    - item_id: ID of the problem or challenge
+    - order: Position in contest (1, 2, 3, ...)
+    - score: (optional) Contest-specific score override
+    """
+    item_type = serializers.ChoiceField(choices=['PROBLEM', 'CHALLENGE'])
+    item_id = serializers.IntegerField(min_value=1)
+    order = serializers.IntegerField(min_value=1)
+    score = serializers.IntegerField(default=100, min_value=1)
+
+    def validate_item_type(self, value):
+        """Validate item type"""
+        if value not in ['PROBLEM', 'CHALLENGE']:
+            raise serializers.ValidationError(
+                "item_type must be 'PROBLEM' or 'CHALLENGE'"
+            )
+        return value
+
+    def validate_order(self, value):
+        """Order must be positive integer"""
+        if value < 1:
+            raise serializers.ValidationError("Order must be at least 1")
+        return value
+
+    def validate_score(self, value):
+        """Score must be positive"""
+        if value < 1:
+            raise serializers.ValidationError("Score must be at least 1")
+        return value
+
+
+class ContestAddManagerSerializer(serializers.Serializer):
+    """Serializer for adding manager to contest"""
+    user_id = serializers.IntegerField(min_value=1)
+
+    def validate_user_id(self, value):
+        """Verify user exists"""
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        
+        try:
+            User.objects.get(id=value)
+        except User.DoesNotExist:
+            raise serializers.ValidationError("User not found")
+        
+        return value
+
+
 class ContestListSerializer(serializers.ModelSerializer):
+    """Minimal contest serializer for list views"""
     created_by = serializers.StringRelatedField()
 
     class Meta:
@@ -20,23 +74,41 @@ class ContestListSerializer(serializers.ModelSerializer):
         ]
 
 
-class ContestProblemSerializer(serializers.ModelSerializer):
-    problem_title = serializers.CharField(source="problem.title", read_only=True)
-    problem_slug = serializers.CharField(source="problem.slug", read_only=True)
-    difficulty = serializers.CharField(source="problem.difficulty", read_only=True)
+class ContestItemSerializer(serializers.ModelSerializer):
+    """Serialize problem or challenge in contest"""
+    title = serializers.SerializerMethodField()
+    slug = serializers.SerializerMethodField()
+    difficulty = serializers.SerializerMethodField()
+    item_type = serializers.CharField(source='get_item_type_display_lower')
 
     class Meta:
-        model = ContestProblem
+        model = ContestItem
         fields = [
             "id",
             "order",
-            "problem_title",
-            "problem_slug",
+            "item_type",
+            "title",
+            "slug",
             "difficulty",
+            "score"
         ]
+
+    def get_title(self, obj):
+        """Get problem or challenge title"""
+        return obj.problem.title if obj.problem else obj.challenge.title
+
+    def get_slug(self, obj):
+        """Get problem or challenge slug"""
+        return obj.problem.slug if obj.problem else obj.challenge.slug
+
+    def get_difficulty(self, obj):
+        """Get problem or challenge difficulty"""
+        return obj.problem.difficulty if obj.problem else obj.challenge.difficulty
 
 
 class ContestCreateSerializer(serializers.ModelSerializer):
+    """Serializer for creating/updating contests"""
+    
     class Meta:
         model = Contest
         fields = [
@@ -51,19 +123,27 @@ class ContestCreateSerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, attrs):
-        """Validate contest timing"""
+        """Validate contest timing and fields"""
         start_time = attrs.get('start_time')
         end_time = attrs.get('end_time')
+        title = attrs.get('title')
+
+        if not title or len(title.strip()) < 3:
+            raise serializers.ValidationError({
+                'title': 'Title must be at least 3 characters'
+            })
 
         if start_time and end_time:
             if start_time >= end_time:
-                raise serializers.ValidationError(
-                    "Start time must be before end time"
-                )
+                raise serializers.ValidationError({
+                    'end_time': 'End time must be after start time'
+                })
+            
             if start_time < now():
-                raise serializers.ValidationError(
-                    "Start time cannot be in the past"
-                )
+                raise serializers.ValidationError({
+                    'start_time': 'Start time cannot be in the past'
+                })
+        
         return attrs
 
 
@@ -71,10 +151,10 @@ class ContestDetailSerializer(serializers.ModelSerializer):
     """Enhanced detail serializer with state info"""
     created_by = serializers.StringRelatedField()
     managers = serializers.StringRelatedField(many=True)
-    problems = serializers.SerializerMethodField()
+    contest_items = serializers.SerializerMethodField()
     current_state = serializers.SerializerMethodField()
     can_edit = serializers.SerializerMethodField()
-    can_add_problems = serializers.SerializerMethodField()
+    can_add_items = serializers.SerializerMethodField()
     time_status = serializers.SerializerMethodField()
 
     class Meta:
@@ -93,27 +173,29 @@ class ContestDetailSerializer(serializers.ModelSerializer):
             "is_published",
             "created_by",
             "managers",
-            "problems",
+            "contest_items",
             "can_edit",
-            "can_add_problems",
+            "can_add_items",
             "time_status",
         ]
 
-    def get_problems(self, obj):
-        """Only return problems if contest is LIVE or user is manager"""
+    def get_contest_items(self, obj):
+        """Only return items if contest is LIVE or user is manager"""
         request = self.context.get('request')
+        
+        if not request:
+            return []
+        
         is_manager = (
-            request.user.is_staff or
+            request.user.is_superuser or
             obj.created_by == request.user or
             request.user in obj.managers.all()
         )
 
-        # Show problems only if LIVE or manager
+        # Show items only if LIVE or manager
         if obj.state == 'LIVE' or is_manager:
-            problems = ContestProblem.objects.filter(
-                contest=obj
-            ).order_by('order')
-            return ContestProblemSerializer(problems, many=True).data
+            items = obj.contest_items.all().order_by('order')
+            return ContestItemSerializer(items, many=True).data
         return []
 
     def get_current_state(self, obj):
@@ -130,18 +212,26 @@ class ContestDetailSerializer(serializers.ModelSerializer):
     def get_can_edit(self, obj):
         """Only draft/scheduled contests can be edited"""
         request = self.context.get('request')
+        
+        if not request or not request.user.is_authenticated:
+            return False
+        
         is_manager = (
-            request.user.is_staff or
+            request.user.is_superuser or
             obj.created_by == request.user or
             request.user in obj.managers.all()
         )
         return is_manager and obj.state in ['DRAFT', 'SCHEDULED']
 
-    def get_can_add_problems(self, obj):
-        """Problems can be added only in DRAFT/SCHEDULED"""
+    def get_can_add_items(self, obj):
+        """Items can be added only in DRAFT/SCHEDULED"""
         request = self.context.get('request')
+        
+        if not request or not request.user.is_authenticated:
+            return False
+        
         is_manager = (
-            request.user.is_staff or
+            request.user.is_superuser or
             obj.created_by == request.user or
             request.user in obj.managers.all()
         )
@@ -170,80 +260,11 @@ class ContestDetailSerializer(serializers.ModelSerializer):
             }
 
 
-class ContestAddManagerSerializer(serializers.Serializer):
-    user_id = serializers.IntegerField()
-
-
-class ContestAddProblemSerializer(serializers.Serializer):
-    problem_id = serializers.IntegerField()
-    order = serializers.IntegerField(min_value=1)
-
-
-class ContestJoinSerializer(serializers.Serializer):
-    """
-    Used ONLY for validation + creation
-    Contest comes from URL
-    """
-
-    def validate(self, attrs):
-        request = self.context["request"]
-        contest = self.context["contest"]
-
-        if ContestParticipant.objects.filter(
-            contest=contest,
-            user=request.user
-        ).exists():
-            raise serializers.ValidationError("Already joined this contest")
-
-        return attrs
-
-    def create(self, validated_data):
-        request = self.context["request"]
-        contest = self.context["contest"]
-
-        return ContestParticipant.objects.create(
-            contest=contest,
-            user=request.user
-        )
-
-class ContestUpdateSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Contest
-        fields = [
-            "title",
-            "slug",
-            "description",
-            "start_time",
-            "end_time",
-            "is_public",
-        ]
-
-class ContestRegistrationSerializer(serializers.ModelSerializer):
-    user_username = serializers.CharField(source='user.username', read_only=True)
-    user_email = serializers.CharField(source='user.email', read_only=True)
-
-    class Meta:
-        model = ContestRegistration
-        fields = [
-            'id',
-            'user',
-            'user_username',
-            'user_email',
-            'status',
-            'registered_at',
-            'participated_at',
-        ]
-
-
 class ContestDetailWithRegistrationSerializer(serializers.ModelSerializer):
     """Enhanced detail view with registration info"""
     created_by = serializers.StringRelatedField()
     managers = serializers.StringRelatedField(many=True)
-    problems = ContestProblemSerializer(
-        source="contest_problems",
-        many=True,
-        read_only=True,
-    )
+    contest_items = serializers.SerializerMethodField()
     registered_count = serializers.SerializerMethodField()
     is_user_registered = serializers.SerializerMethodField()
     can_register = serializers.SerializerMethodField()
@@ -260,7 +281,7 @@ class ContestDetailWithRegistrationSerializer(serializers.ModelSerializer):
             "end_time",
             "created_by",
             "managers",
-            "problems",
+            "contest_items",
             "is_public",
             "registered_count",
             "is_user_registered",
@@ -268,8 +289,17 @@ class ContestDetailWithRegistrationSerializer(serializers.ModelSerializer):
             "status",
         ]
 
+    def get_contest_items(self, obj):
+        """Show items if LIVE"""
+        if obj.state == 'LIVE':
+            items = obj.contest_items.all().order_by('order')
+            return ContestItemSerializer(items, many=True).data
+        return []
+
     def get_registered_count(self, obj):
-        return obj.registrations.filter(status__in=['REGISTERED', 'PARTICIPATED']).count()
+        return obj.registrations.filter(
+            status__in=['REGISTERED', 'PARTICIPATED']
+        ).count()
 
     def get_is_user_registered(self, obj):
         request = self.context.get('request')
@@ -282,11 +312,9 @@ class ContestDetailWithRegistrationSerializer(serializers.ModelSerializer):
 
     def get_can_register(self, obj):
         """User can register if contest hasn't started yet"""
-        from django.utils.timezone import now
         return now() < obj.start_time
 
     def get_status(self, obj):
-        from django.utils.timezone import now
         current_time = now()
         if current_time < obj.start_time:
             return "UPCOMING"
@@ -296,19 +324,20 @@ class ContestDetailWithRegistrationSerializer(serializers.ModelSerializer):
             return "ENDED"
 
 
-class ContestChallengeSerializer(serializers.ModelSerializer):
-    challenge_title = serializers.CharField(source="challenge.title", read_only=True)
-    challenge_slug = serializers.CharField(source="challenge.slug", read_only=True)
-    difficulty = serializers.CharField(source="challenge.difficulty", read_only=True)
+class ContestRegistrationSerializer(serializers.ModelSerializer):
+    """Serializer for contest registrations"""
+    user_username = serializers.CharField(source='user.username', read_only=True)
+    user_email = serializers.CharField(source='user.email', read_only=True)
 
     class Meta:
-        model = __import__('contest.models', fromlist=['ContestChallenge']).ContestChallenge
+        model = ContestRegistration
         fields = [
-            "id",
-            "order",
-            "challenge_title",
-            "challenge_slug",
-            "difficulty",
-            "score",
-            "time_limit",
+            'id',
+            'user',
+            'user_username',
+            'user_email',
+            'status',
+            'registered_at',
+            'participated_at',
         ]
+        read_only_fields = ['id', 'registered_at', 'participated_at']
