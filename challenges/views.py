@@ -15,7 +15,7 @@ from .serializers import (
     PracticeProblemCreateUpdateSerializer,
 )
 from .permissions import IsChallengeCreator, IsSuperUserOnly
-from contest.models import Contest
+from contest.models import ContestItem, ContestParticipant
 
 
 # ============================================================
@@ -23,7 +23,14 @@ from contest.models import Contest
 # ============================================================
 
 class ChallengeCreateView(APIView):
-    """Create a new challenge"""
+    """
+    Create a new challenge.
+    
+    Accessible to: Managers only (is_staff=True or is_superuser)
+    Request body: title, slug, statement, input_format, output_format, 
+                  difficulty, time_limit, memory_limit, tags
+    Returns: Created challenge details
+    """
     permission_classes = [IsAuthenticated, IsAdminUser]
 
     def post(self, request):
@@ -37,18 +44,32 @@ class ChallengeCreateView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-class ChallengeListView(APIView):
-    """List all challenges created by user"""
-    permission_classes = [IsAuthenticated]
+class ChallengeListMyView(APIView):
+    """
+    List all challenges created by the current user.
+    
+    Accessible to: Authenticated managers
+    Returns: List of user's challenges (minimal info)
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
 
     def get(self, request):
-        challenges = Challenge.objects.filter(created_by=request.user)
+        challenges = Challenge.objects.filter(
+            created_by=request.user
+        ).order_by('-created_at')
+        
         serializer = ChallengeListSerializer(challenges, many=True)
         return Response(serializer.data)
 
 
 class ChallengeDetailView(APIView):
-    """Get, update, or delete a challenge"""
+    """
+    Get, update, or delete a challenge.
+    
+    GET: Accessible to challenge creator or superuser
+    PUT: Update challenge (only creator or superuser)
+    DELETE: Delete challenge (only creator or superuser)
+    """
     permission_classes = [IsAuthenticated, IsChallengeCreator]
 
     def get_challenge(self):
@@ -56,12 +77,26 @@ class ChallengeDetailView(APIView):
 
     def get(self, request, challenge_id):
         challenge = self.get_challenge()
+        
+        # Verify access
+        if challenge.created_by != request.user and not request.user.is_superuser:
+            return Response(
+                {"error": "Permission denied"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
         serializer = ChallengeDetailSerializer(challenge)
         return Response(serializer.data)
 
     def put(self, request, challenge_id):
         challenge = self.get_challenge()
-        self.check_object_permissions(request, challenge)
+        
+        # Verify access
+        if challenge.created_by != request.user and not request.user.is_superuser:
+            return Response(
+                {"error": "Permission denied"},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
         serializer = ChallengeCreateUpdateSerializer(
             challenge,
@@ -78,7 +113,13 @@ class ChallengeDetailView(APIView):
 
     def delete(self, request, challenge_id):
         challenge = self.get_challenge()
-        self.check_object_permissions(request, challenge)
+        
+        # Verify access
+        if challenge.created_by != request.user and not request.user.is_superuser:
+            return Response(
+                {"error": "Permission denied"},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
         challenge.delete()
         return Response(
@@ -88,15 +129,27 @@ class ChallengeDetailView(APIView):
 
 
 class ChallengeTestCaseCreateView(APIView):
-    """Add test case to challenge"""
-    permission_classes = [IsAuthenticated, IsChallengeCreator]
+    """
+    Add test case to a challenge.
+    
+    Accessible to: Challenge creator or superuser
+    Request body: input_data, expected_output, is_sample, is_hidden
+    Returns: Created test case details
+    """
+    permission_classes = [IsAuthenticated]
 
     def get_challenge(self):
         return get_object_or_404(Challenge, id=self.kwargs["challenge_id"])
 
     def post(self, request, challenge_id):
         challenge = self.get_challenge()
-        self.check_object_permissions(request, challenge)
+
+        # Verify ownership
+        if challenge.created_by != request.user and not request.user.is_superuser:
+            return Response(
+                {"error": "Permission denied"},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
         test_case = ChallengeTestCase.objects.create(
             challenge=challenge,
@@ -120,36 +173,28 @@ class ChallengeTestCaseCreateView(APIView):
 
 # ============================================================
 # PUBLIC PRACTICE CHALLENGES
-# (Auto-visible after contest ends)
 # ============================================================
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
-from rest_framework import status
-from django.shortcuts import get_object_or_404
-
-from challenges.models import Challenge
-from contest.models import ContestItem
-from .serializers import ChallengeListSerializer, ChallengeDetailSerializer
-
 
 class PublicPracticeChallengesView(APIView):
     """
     List challenges available for public practice.
-    Only shows challenges where:
-    - allow_public_practice_after_contest = true
-    - Associated contest state = ENDED
+    
+    Accessible to: Authenticated users
+    Rules: Only challenges where:
+           - allow_public_practice_after_contest = true
+           - Associated contest state = ENDED
+    Returns: List of publicly available challenges
     """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         # Get all challenges marked for public practice
         challenges = Challenge.objects.filter(
-            allow_public_practice_after_contest=True
+            allow_public_practice_after_contest=True,
+            state='PUBLISHED'
         )
 
         # Filter by challenges that are in any ENDED contest
-        from django.utils.timezone import now
         ended_contest_item_ids = ContestItem.objects.filter(
             challenge__in=challenges,
             contest__state='ENDED'
@@ -162,7 +207,14 @@ class PublicPracticeChallengesView(APIView):
 
 
 class PublicPracticeChallengeDetailView(APIView):
-    """Get public practice challenge details"""
+    """
+    Get public practice challenge details.
+    
+    Accessible to: Authenticated users
+    Rules: Challenge must be marked for public practice AND
+           associated contest must be ENDED
+    Returns: Challenge detail with sample test cases
+    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request, slug):
@@ -187,15 +239,26 @@ class PublicPracticeChallengeDetailView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        serializer = ChallengeDetailSerializer(challenge)
+        serializer = ChallengeDetailSerializer(
+            challenge,
+            context={'request': request}
+        )
         return Response(serializer.data)
+
 
 # ============================================================
 # SUPERUSER PRACTICE PROBLEM APIS
 # ============================================================
 
 class PracticeProblemCreateView(APIView):
-    """Create a new practice problem (superuser only)"""
+    """
+    Create a new practice problem.
+    
+    Accessible to: Superusers only
+    Request body: title, slug, statement, input_format, output_format,
+                  difficulty, time_limit, memory_limit, tags
+    Returns: Created practice problem details
+    """
     permission_classes = [IsAuthenticated, IsSuperUserOnly]
 
     def post(self, request):
@@ -210,17 +273,28 @@ class PracticeProblemCreateView(APIView):
 
 
 class PracticeProblemListView(APIView):
-    """List all public practice problems"""
+    """
+    List all public practice problems.
+    
+    Accessible to: Authenticated users
+    Returns: List of practice problems (minimal info)
+    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        problems = PracticeProblem.objects.all()
+        problems = PracticeProblem.objects.all().order_by('-created_at')
         serializer = PracticeProblemListSerializer(problems, many=True)
         return Response(serializer.data)
 
 
 class PracticeProblemDetailView(APIView):
-    """Get, update, or delete a practice problem"""
+    """
+    Get, update, or delete a practice problem.
+    
+    GET: Accessible to all authenticated users
+    PUT: Update practice problem (only creator or superuser)
+    DELETE: Delete practice problem (only creator or superuser)
+    """
     permission_classes = [IsAuthenticated]
 
     def get_problem(self):
@@ -228,13 +302,16 @@ class PracticeProblemDetailView(APIView):
 
     def get(self, request, problem_id):
         problem = self.get_problem()
-        serializer = PracticeProblemDetailSerializer(problem)
+        serializer = PracticeProblemDetailSerializer(
+            problem,
+            context={'request': request}
+        )
         return Response(serializer.data)
 
     def put(self, request, problem_id):
         problem = self.get_problem()
 
-        # Check permission
+        # Check permission: only creator or superuser
         if problem.created_by != request.user and not request.user.is_superuser:
             return Response(
                 {"error": "Permission denied"},
@@ -257,7 +334,7 @@ class PracticeProblemDetailView(APIView):
     def delete(self, request, problem_id):
         problem = self.get_problem()
 
-        # Check permission
+        # Check permission: only creator or superuser
         if problem.created_by != request.user and not request.user.is_superuser:
             return Response(
                 {"error": "Permission denied"},
@@ -272,7 +349,13 @@ class PracticeProblemDetailView(APIView):
 
 
 class PracticeProblemTestCaseCreateView(APIView):
-    """Add test case to practice problem"""
+    """
+    Add test case to a practice problem.
+    
+    Accessible to: Superusers only
+    Request body: input_data, expected_output, is_sample
+    Returns: Created test case details
+    """
     permission_classes = [IsAuthenticated, IsSuperUserOnly]
 
     def get_problem(self):

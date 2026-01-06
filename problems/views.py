@@ -1,6 +1,7 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, permissions
+from django.shortcuts import get_object_or_404
 
 from .models import Problem
 from .serializers import (
@@ -9,32 +10,46 @@ from .serializers import (
 )
 
 
-# -------------------------
-# List all problems
-# -------------------------
+# ============================================================
+# Problem Views
+# ============================================================
+
 class ProblemListView(APIView):
+    """
+    List all published problems.
+    
+    Accessible to: All users (no auth required)
+    Returns: Problem list with basic info (no test cases)
+    """
     permission_classes = [permissions.AllowAny]
 
     def get(self, request):
-        problems = Problem.objects.filter(is_published=True)
+        problems = Problem.objects.filter(
+            is_published=True
+        ).order_by('-created_at')
+        
         serializer = ProblemListSerializer(problems, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
-# -------------------------
-# Get single problem
-# -------------------------
 class ProblemDetailView(APIView):
+    """
+    Get single problem with all details.
+    
+    Accessible to: All users (no auth required)
+    Returns: Problem detail with sample test cases (hidden tests excluded)
+    """
     permission_classes = [permissions.AllowAny]
 
     def get(self, request, slug):
-        try:
-            problem = Problem.objects.get(slug=slug, is_published=True)
-        except Problem.DoesNotExist:
-            return Response(
-                {'error': 'Problem not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-
-        serializer = ProblemDetailSerializer(problem)
+        problem = get_object_or_404(
+            Problem,
+            slug=slug,
+            is_published=True
+        )
+        
+        serializer = ProblemDetailSerializer(
+            problem,
+            context={'request': request}
+        )
         return Response(serializer.data, status=status.HTTP_200_OK)
